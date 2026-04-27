@@ -35,7 +35,9 @@
         .time-item { border: 1px solid #ddd; padding: 5px; text-align: center; font-size: 11px; cursor: pointer; border-radius: 3px; background: white; }
         .time-item.selected { background: var(--main-pink); color: white; border-color: var(--main-pink); }
         .match-box { background: #fff5f8; padding: 15px; border-radius: 8px; border: 1px solid #f8bbd0; margin-top: 20px; font-size: 13px; min-height: 50px; }
+        .btn-group { display: flex; gap: 5px; }
         .copy-btn { background: #555; font-size: 11px; padding: 8px 12px; width: auto; margin-top: 10px; }
+        .reset-btn { background: #ff5252; font-size: 11px; padding: 8px 12px; width: auto; margin-top: 10px; }
     </style>
 </head>
 <body>
@@ -55,7 +57,10 @@
             </div>
         </div>
         <div id="matchResult" class="match-box">일정을 불러오는 중입니다...</div>
-        <button id="copyBtn" class="copy-btn" onclick="copyToClipboard()" style="display:none;">결과 복사하기 📋</button>
+        <div class="btn-group">
+            <button id="copyBtn" class="copy-btn" onclick="copyToClipboard()" style="display:none;">결과 복사하기 📋</button>
+            <button id="resetAllBtn" class="reset-btn" onclick="resetAllSchedules()" style="display:none;">전체 일정 초기화 🔄</button>
+        </div>
     </div>
 
     <div id="step-add-profile" class="step">
@@ -77,7 +82,6 @@
 </div>
 
 <script>
-    // Firebase 설정
     const firebaseConfig = {
         apiKey: "AIzaSyAlOyqwtXoyIW-s61KUNPK0owQmtp1oJXs",
         authDomain: "appointmentapp-92f70.firebaseapp.com",
@@ -101,6 +105,7 @@
     let users = []; 
     let currentEditingId = null;
     let tempDates = [];
+    let currentAvailData = {};
 
     database.ref('rooms/' + roomId).on('value', (snapshot) => {
         const data = snapshot.val();
@@ -141,46 +146,54 @@
             </div>
         `;
         calculateMatches();
+        // 초기화 버튼 보임 여부 (유저가 있을 때만)
+        document.getElementById('resetAllBtn').style.display = users.length > 0 ? "block" : "none";
     }
 
-    // ★ 이전 선택 기록을 불러오는 기능 추가
     function startEditTime(id) {
         currentEditingId = id;
         const user = users.find(u => u.id === id);
         document.getElementById('editingName').innerText = user.name;
         document.getElementById('timeEditor').innerHTML = ""; 
-        
-        // 1. 달력 초기화 및 이전 날짜들 선택
-        const prevDates = user.availability ? Object.keys(user.availability) : [];
+        currentAvailData = user.availability ? JSON.parse(JSON.stringify(user.availability)) : {};
+        const prevDates = Object.keys(currentAvailData);
         fp.setDate(prevDates);
-        
-        // 2. 선택된 날짜에 맞게 시간표 그리기
         tempDates = prevDates;
-        renderTimeGrid(user.availability); // 이전 기록을 함께 전달
-        
+        renderTimeGrid();
         showStep('step-edit-time');
     }
 
     const fp = flatpickr("#calendar-inline", {
         inline: true, mode: "multiple", locale: "ko",
         onChange: (dates) => {
-            tempDates = dates.map(d => {
+            updateCurrentAvailDataFromUI();
+            const newDateStrings = dates.map(d => {
                 const year = d.getFullYear();
                 const month = String(d.getMonth() + 1).padStart(2, '0');
                 const day = String(d.getDate()).padStart(2, '0');
                 return `${year}-${month}-${day}`;
             });
-            // 달력을 직접 조작할 때는 새로 그림 (기존 선택값 유지 X)
+            Object.keys(currentAvailData).forEach(date => {
+                if (!newDateStrings.includes(date)) delete currentAvailData[date];
+            });
+            tempDates = newDateStrings;
             renderTimeGrid();
         }
     });
 
-    // ★ 시간표를 그릴 때 기존 기록이 있으면 'selected' 클래스 추가
-    function renderTimeGrid(prevAvailability = null) {
+    function updateCurrentAvailDataFromUI() {
+        document.querySelectorAll('.time-grid').forEach(grid => {
+            const date = grid.dataset.date;
+            const selected = [...grid.querySelectorAll('.time-item.selected')].map(el => el.innerText);
+            if(selected.length > 0) currentAvailData[date] = selected;
+            else delete currentAvailData[date];
+        });
+    }
+
+    function renderTimeGrid() {
         const container = document.getElementById('timeEditor');
         container.innerHTML = tempDates.map(date => {
-            const savedTimes = (prevAvailability && prevAvailability[date]) ? prevAvailability[date] : [];
-            
+            const savedTimes = currentAvailData[date] || [];
             return `
                 <div style="margin-top:15px; border:1px solid #eee; padding:10px; border-radius:5px;">
                     <span style="font-size:12px; font-weight:bold;">${date}</span>
@@ -188,7 +201,7 @@
                         ${Array.from({length: 24}, (_, i) => {
                             const timeStr = `${String(i).padStart(2, '0')}:00`;
                             const isSelected = savedTimes.includes(timeStr) ? 'selected' : '';
-                            return `<div class="time-item ${isSelected}" onclick="this.classList.toggle('selected')">${timeStr}</div>`;
+                            return `<div class="time-item ${isSelected}" onclick="toggleTime(this, '${date}', '${timeStr}')">${timeStr}</div>`;
                         }).join('')}
                     </div>
                 </div>
@@ -196,24 +209,41 @@
         }).join('');
     }
 
-    function saveUserTimeToServer() {
-        const avail = {};
-        document.querySelectorAll('.time-grid').forEach(grid => {
-            const date = grid.dataset.date;
-            const selected = [...grid.querySelectorAll('.time-item.selected')].map(el => el.innerText);
-            if(selected.length > 0) avail[date] = selected;
-        });
-        
-        // 일정을 모두 지웠을 수도 있으므로 경고창 대신 물어보기
-        if(Object.keys(avail).length === 0) {
-            if(!confirm("선택된 일정이 없습니다. 일정을 초기화할까요?")) return;
+    function toggleTime(el, date, timeStr) {
+        el.classList.toggle('selected');
+        if (!currentAvailData[date]) currentAvailData[date] = [];
+        if (el.classList.contains('selected')) {
+            if (!currentAvailData[date].includes(timeStr)) currentAvailData[date].push(timeStr);
+        } else {
+            currentAvailData[date] = currentAvailData[date].filter(t => t !== timeStr);
+            if (currentAvailData[date].length === 0) delete currentAvailData[date];
         }
+    }
 
+    function saveUserTimeToServer() {
+        updateCurrentAvailDataFromUI();
         database.ref('rooms/' + roomId + '/' + currentEditingId).update({
-            availability: avail, isDone: (Object.keys(avail).length > 0)
+            availability: currentAvailData, 
+            isDone: (Object.keys(currentAvailData).length > 0)
         }).then(() => {
             tempDates = [];
+            currentAvailData = {};
             showStep('step-home');
+        });
+    }
+
+    // ★ 전체 일정 초기화 함수 (데이터베이스의 모든 유저 일정을 비움)
+    function resetAllSchedules() {
+        if(!confirm("모든 멤버의 일정을 초기화하고 새 약속을 잡을까요?\n(멤버 목록은 유지됩니다)")) return;
+        
+        const updates = {};
+        users.forEach(u => {
+            updates[`rooms/${roomId}/${u.id}/availability`] = {};
+            updates[`rooms/${roomId}/${u.id}/isDone`] = false;
+        });
+        
+        database.ref().update(updates).then(() => {
+            alert("모든 일정이 초기화되었습니다! ✨");
         });
     }
 
